@@ -1,0 +1,313 @@
+---
+title: "Homework 2"
+output: html_document
+---
+**I have neither received nor given unauthorized aid on this assignment.**  
+3/16/2022  
+*Aditya Jain*
+
+```{r setup, include = FALSE}
+# define certain setup parameters
+knitr::opts_chunk$set(echo = TRUE,
+                      warning = FALSE,
+                      message = FALSE,
+                      cache = TRUE)
+```
+
+```{r libraries}
+library(tidyverse)
+library(pROC)
+library(knitr)
+# Load magrittr compound pipe
+`%<>%` <- magrittr::`%<>%`
+```
+
+```{r read data}
+# financial information on various companies between 1990 and 2014.
+fraud.data <- read_csv("fraud.csv")
+# quick check to see if any NAs in misstate
+unique(is.na(fraud.data$misstate)) # FALSE
+```
+## Question 1
+ 
+I worked in collaboration with Rebecca Amen on this question. 
+
+```{r split data}
+# begin by splitting data randomly
+set.seed(123)
+n <- nrow(fraud.data)
+train_indices <- sample(1:n, size = floor(0.8*n))
+train_fraud <- fraud.data %>% slice(train_indices)
+test_fraud <- fraud.data %>% slice(-train_indices)
+```
+
+```{r clean test data}
+#impute missing values in test data using means from the training set===========
+
+# begin by replacing 0s with NAs in training set 
+train_fraud %<>%
+   mutate(across(.cols = csho:board_size, # use only predictors
+                .fns = ~replace(., . == 0, NA)))
+
+# get the means from the training set
+training_means <- apply(train_fraud %>% select(-misstate), MARGIN = 2,
+                        FUN = mean,
+                        na.rm = T)
+# replace 0s with NAs in test set
+test_fraud %<>%
+  mutate(across(.cols = csho:board_size, # use only predictors
+                .fns = ~replace(., . == 0, NA)))
+
+# impute means for NAs
+test_fraud %<>%
+  replace_na(as.list(training_means))
+```
+
+```{r, echo=FALSE}
+#cleanup
+rm(training_means)
+```
+
+```{r clean training data} 
+# clean training data by imputing mean for NA values 
+train_fraud %<>%
+  # impute mean for NAs
+  mutate(across(.cols = csho:board_size,
+                .fns = ~ replace_na(., mean(., na.rm = TRUE)))) 
+```
+
+```{r fit logistic regression}
+m_log_reg <- glm(formula = misstate ~ ., # use . to get all the predictors 
+                 data = train_fraud,
+                 family = binomial) # for logistic regression
+```
+
+## Question 2  
+
+Except for the number of board members who are independent *num_independent*, 
+and the number of individuals on the company board *board_size*, 
+all the predictor variables are not statistically significant at a $0.05$ 
+significance threshold. 
+
+```{r} 
+summary(m_log_reg)
+```
+
+The sign on the estimated coefficient for number of board members who are 
+independent *num_independent* is negative. This implies that for fixed values 
+of other predictors, a company with a higher number of board members who are 
+independent is less likely to have a fraudulent financial statement.
+
+The sign on the estimated coefficient for *board_size* is positive. This means
+that the greater the number of individuals on the company board, the more likely 
+it is to have a fraudulent financial statement.
+
+I would advise my supervisor that based on financial information on various companies
+betwen 1990 and 2014, for a given company, the greater the number of board members who are independent the better,
+since that implies a smaller likelihood that the financial statement of the company 
+is fraudulent, all other things equal. 
+
+On the other hand, the smaller the number of individuals on the company board the
+better, since it means there is a smaller likelihood that the financial statement 
+of the company is fraudulent, all other things equal. In sum, the advisor should be suspicious of
+companies with a small board size and/or high number of independent board members.
+  
+
+Below, we see the proportion of data imputed in each of the statistically 
+significant variables. To calculate this proportion, I use the entire dataset (not just the training),
+because both training and test are random samples of this dataset and should therefore be approximately reflective of the dataset in their proportion of imputed data. Almost $6$% of the data for *num_independent* are imputed, while none of the data for 
+the *board_size* are imputed. This means that we can be confident in their
+estimates and statistical significance. More imputed data means that we get less actual information about the variable.
+We will consider an arbitrary threshold of $10$% imputed data to have confidence in our estimates.
+
+```{r}
+sig_vars <- c("num_independent",
+              "board_size")
+
+sig_vars_data <- fraud.data %>%
+  # get the training data before its been imputed
+  slice(train_indices) %>%
+  # extract stat. significant variables
+  select(all_of(sig_vars))
+
+# (colSums(is.na(sig_vars_data)) + colSums(sig_vars_data == 0))/nrow(sig_vars_data)
+
+apply(sig_vars_data, 2, function(x) round(mean(x == 0) + mean(is.na(x)), 3)) %>%
+  kable(col.names = c("Proportion Imputed"))
+
+rm(sig_vars_data) #cleanup
+```
+
+The proportion of observations for the non-statistically significant variables 
+that were imputed is given below. Most variables have less than $10$% of their 
+data imputed, which lends confidence in their coefficient estimates. But at least 
+a quarter of the data for *invt*, *dlc*, *dltt*, *ivao*, *sstk*, *txp*, *txt*, *ivst*, *key_board_percent_independent* and
+*dltis* are imputed, which questions the confidence we can have in their coefficient estimates. 
+There are some variables with more than *60*% imputed data, *ivao* for example. We cannot be confident in their estimates at all. *xint* has almost $15$% of its data imputed, which lends some confidence to its coefficient estimate, 
+but its not as desirable as having less than $10$% imputed data. 
+
+```{r}
+sig_vars <- c(sig_vars,"misstate") # add response variable & remove these vars.
+
+unsig_vars_data <- fraud.data %>%
+  # get the training data before its been imputed
+  slice(train_indices) %>%
+  # extract stat. significant variables
+  select(-all_of(sig_vars))
+
+apply(unsig_vars_data, 2, function(x) round(mean(x == 0) + mean(is.na(x)), 3)) %>%
+  kable(col.names = c("Proportion Imputed"))
+
+rm(unsig_vars_data) #cleanup
+```
+
+## Question 3
+
+The following is the ROC curve: 
+
+```{r ROC curve}
+pred_probs <- predict(m_log_reg, newdata = test_fraud, type = "response")
+
+roc_obj <- roc(predictor = pred_probs,
+    response = test_fraud$misstate)
+
+plot(roc_obj, legacy.axes = T)
+```
+
+With AUC: 
+
+```{r AUC}
+auc(roc_obj)
+```
+
+The point $(0,0)$ on the *ROC* corresponds to a *d.t.* = 1. The False Positive
+Rate (FPR) at this point is $0$ because every observation is predicted to not 
+have a fraudulent financial statement, which means that there are no false positives.
+But this also means that there are no true positives, yielding a sensitivity of $0$.
+
+Note that we have four actual positives in the test data. This suggests four "jumps"
+in sensitivity values, which is what we observe.
+
+```{r}
+table(test_fraud$misstate)
+```
+
+Let's store the indices at which the actual positives occur, after sorting the 
+associated predicted probabilities in a decreasing order:
+
+```{r}
+output <- tibble(pred_prob = pred_probs,
+       test_misstate = test_fraud$misstate) %>%
+  arrange(-pred_probs)
+  
+pos_indices <- which(output$test_misstate == 1)
+```
+
+In the following output, we get the sorted predicted probabilities for observations
+that are actual positives, and the indices for these observations.
+
+```{r}
+actual_pos <- cbind(output[pos_indices,1], indices = pos_indices)
+actual_pos
+```
+
+As the *d.t.* decreases, we see a jump in the sensitivity, 
+whenever the $d.t$ is just under one of these 
+predicted probabilities. Here, the ROC moves to $(0.01,0.25)$ when the *d.t.* shifts to about `r actual_pos$pred_prob[1]`, which leads to the classification of an actual positive as a true positive. This is verified below.
+
+```{r}
+pred_labs <- if_else(pred_probs > 0.21, 1, 0)
+# confusion matrix
+conf_mtx <- table(pred_labs, test_fraud$misstate)
+conf_mtx 
+```
+
+```{r}
+# sensitivity
+#TP/P 
+conf_mtx[2,2]/sum(conf_mtx[,2])
+```
+
+```{r}
+# 1 - specificity(TN/N) 
+# FP/N
+1- conf_mtx[1,1]/sum(conf_mtx[,1])
+```
+
+Further, as the *d.t.* tends to 0, the *ROC* "jumps" up whenever the 
+predicted probability is low enough to admit another actual positive as predicted 
+positive. Specifically, the jump is because the true positive rate increases by
+$0.25$ (there are four total actual positives, none of which occur "back-to-back"), while the false positive rate remains the same. But as the decision threshold decreases, the actual negatives between any two of the actual positives also get classified as predicted positives so that the 
+false positive rate increases. This leads to a horizontal movement.
+
+The decision threshold values that mark a horizontal movement of the *ROC* curve,
+are the values just below the predicted probability values of the
+observation occurring right before an actual positive:
+
+```{r}
+pos_indices <- pos_indices - 1
+cbind(output[pos_indices,1], indices = pos_indices) 
+```
+
+Note that the length of this horizontal step is dictated by the number of observations
+(which will be actual negatives necessarily) between any two actual positives. This is because 
+the False positive rate increases, with the true positive rate remaining the same,
+as more and more actual negatives are classified as predicted positive. Thus, we see that the 
+first horizontal step is very small because only six observations are being classified as false positives before
+sensitivity increases. The false positive rate here is $6/633 =$ `r (actual_pos$indices[1]-1)/633` (we have 637 total observations, 4 actual positives) with a true positive rate of $0$.
+
+The third horizontal step is much larger because we gain more false positives as the 
+*d.t.* continues to decrease from about `r actual_pos$pred_prob[2]` (*d.t.* where the second actual positive observation becomes true positive) to about `r actual_pos$pred_prob[3]`.
+
+Let's see the specific point on the ROC that marks this third horizontal movement:
+
+```{r}
+pred_labs <- if_else(pred_probs > 0.0009, 1, 0)
+# confusion matrix
+conf_mtx <- table(pred_labs, test_fraud$misstate)
+conf_mtx 
+```
+
+```{r}
+# sensitivity
+#TP/P 
+conf_mtx[2,2]/sum(conf_mtx[,2])
+```
+
+```{r}
+# 1 - specificity(TN/N) 
+# FP/N
+1- conf_mtx[1,1]/sum(conf_mtx[,1])
+```
+
+We can repeat this for each horizontal step to see the point on the ROC that
+corresponds to the *d.t.* that marks these horizontal steps.  
+Finally, the point $(1,1)$ occurs at a *d.t.* = 0, where all observations are
+predicted positive, i.e., predicted to have a fraudulent financial statement. This
+means that all the actual negatives are false positives, and all the actual 
+positives are true positives.
+
+## Question 4:
+
+The dataset serves as our random sample of companies from 1990 to 2014. This dataset
+contains $n = 3184$ observations. We randomly select $n$ observations from the 
+dataset in order to produce a bootstrap sample of size $n$ (same as the original dataset).
+The sampling is performed with replacement. 
+
+We split the dataset into training and test sets, and use the training set means
+(without using the missing values) to impute missing data for test set predictors. 
+And then we also impute means for missing data in
+the training set. We proceed by fitting a logistic regression model using the training data
+that uses the 30 predictors to classify financial statements as fraudulent or non-fraudulent.
+We use this model to make predictions for whether financial statements are fraudulent 
+on the test set. 
+
+We use these predictions along with the actual response values for our test set to
+create an ROC curve. Finally, we find the AUC of this ROC. This entire procedure 
+to get an AUC value is repeated $B$ times for some large value of $B$, say $5000$,
+in order to produce $B$ different bootstrap samples and $B$ corresponding $AUC$ values. 
+
+Lastly, we plot the distribution of AUC values and find the middle $95$% of this
+AUC distribution. This is a 95% confidence interval for the AUC.
+
+
